@@ -25,44 +25,64 @@ impl<F: PrimeField> SimplePlonkifer<F> {
 
     fn addition(
         &mut self,
-        (var_a, coeff_a): (usize, F),
-        (var_b, coeff_b): (usize, F),
-    ) -> (usize, F) {
-        self.add_selectors(vec![coeff_a, coeff_b, -F::one(), F::zero(), F::zero()]);
+        (var_a, coeff_a, const_a): (usize, F, F),
+        (var_b, coeff_b, const_b): (usize, F, F),
+    ) -> (usize, F, F) {
+        if coeff_a == F::zero() {
+            return (var_b, coeff_b, const_a + const_b);
+        }
+        if coeff_b == F::zero() {
+            return (var_a, coeff_a, const_a + const_b);
+        }
+
+        self.add_selectors(vec![
+            coeff_a,
+            coeff_b,
+            -F::one(),
+            F::zero(),
+            const_a + const_b,
+        ]);
 
         let new_index = self.variable_assignments.len();
         self.variable_assignments.push(
-            self.variable_assignments[var_a] * coeff_a + self.variable_assignments[var_b] * coeff_b,
+            self.variable_assignments[var_a] * coeff_a
+                + self.variable_assignments[var_b] * coeff_b
+                + const_a
+                + const_b,
         );
 
         self.constraint_variables
             .push(vec![var_a, var_b, new_index]);
-        (new_index, F::one())
+        (new_index, F::one(), F::zero())
     }
 
     fn mul_constraint(
         &mut self,
-        (var_a, coeff_a): (usize, F),
-        (var_b, coeff_b): (usize, F),
-        (var_c, coeff_c): (usize, F),
+        (var_a, coeff_a, const_a): (usize, F, F),
+        (var_b, coeff_b, const_b): (usize, F, F),
+        (var_c, coeff_c, const_c): (usize, F, F),
     ) {
         self.add_selectors(vec![
-            F::zero(),
-            F::zero(),
+            const_b * coeff_a,
+            const_a * coeff_b,
             -coeff_c,
             coeff_a * coeff_b,
-            F::zero(),
+            const_a * const_b - const_c,
         ]);
         self.constraint_variables.push(vec![var_a, var_b, var_c]);
     }
 
-    fn lc_sum(&mut self, variables: &[(usize, F)]) -> (usize, F) {
+    fn lc_sum(&mut self, variables: &[(usize, F)]) -> (usize, F, F) {
         if variables.len() == 0 {
-            (0, F::zero())
+            (0, F::zero(), F::zero())
         } else {
-            let mut sum = variables[0];
-            for value in variables.iter().skip(1) {
-                sum = self.addition(sum, *value);
+            let mut sum = (0, F::zero(), F::zero());
+            for (var, coeff) in variables {
+                if *var == 0 {
+                    sum.2 += coeff;
+                } else {
+                    sum = self.addition(sum, (*var, *coeff, F::zero()));
+                }
             }
             sum
         }
