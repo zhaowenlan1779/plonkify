@@ -69,6 +69,36 @@ impl<F: PrimeField> OptimizedPlonkifier<F> {
         self.constraint_variables.push(vec![var_a, var_b, var_c]);
     }
 
+    fn mul_constraint_c_opt(
+        &mut self,
+        (var_a, coeff_a, const_a): (usize, F, F),
+        (var_b, coeff_b, const_b): (usize, F, F),
+        variables_c: &[(usize, F)],
+    ) {
+        let mut selectors = vec![
+            const_b * coeff_a,
+            const_a * coeff_b,
+            F::zero(),
+            coeff_a * coeff_b,
+            const_a * const_b,
+        ];
+        let mut var_c = 0usize;
+        for (var, coeff) in variables_c {
+            if *var == 0 {
+                selectors[4] -= coeff;
+            } else if *var == var_a {
+                selectors[0] -= coeff;
+            } else if *var == var_b {
+                selectors[1] -= coeff;
+            } else {
+                var_c = *var;
+                selectors[2] -= coeff;
+            }
+        }
+        self.add_selectors(selectors);
+        self.constraint_variables.push(vec![var_a, var_b, var_c]);
+    }
+
     fn lc_sum(&mut self, variables: &[(usize, F)]) -> (usize, F, F) {
         if variables.len() == 0 {
             (0, F::zero(), F::zero())
@@ -138,8 +168,22 @@ impl<F: PrimeField> Plonkifier<F> for OptimizedPlonkifier<F> {
         for (a, b, c) in &r1cs.constraints {
             let value_a = data.lc_sum(&a);
             let value_b = data.lc_sum(&b);
-            let value_c = data.lc_sum(&c);
-            data.mul_constraint(value_a, value_b, value_c);
+
+            let mut c_count = 0;
+            for (var, _) in c {
+                if *var != 0 && *var != value_a.0 && *var != value_b.0 {
+                    c_count += 1;
+                }
+                if c_count >= 2 {
+                    break;
+                }
+            }
+            if c_count <= 1 {
+                data.mul_constraint_c_opt(value_a, value_b, c);
+            } else {
+                let value_c = data.lc_sum(&c);
+                data.mul_constraint(value_a, value_b, value_c);
+            }
         }
 
         let num_constraints = data.constraint_variables.len();
