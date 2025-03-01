@@ -2,4 +2,5 @@ mod circuit;
 mod custom_gate;
 mod plonkify;
 mod selectors;
-mod vanilla;
+pub mod vanilla;
+pub use plonkify::Plonkifier;
