@@ -127,8 +127,6 @@ impl<F: PrimeField> Plonkifier<F> for GreedyBruteForcePlonkifier<F> {
             constraint_variables: Vec::new(),
             variable_assignments: r1cs.witness.clone(),
         };
-        let mut relation_occurrences: HashMap<(usize, usize, F), Vec<(usize, usize)>> =
-            HashMap::new();
         let mut relation_queue: BTreeSet<RelationRecord<F>> = BTreeSet::new();
         let mut constraints: Vec<[(Vec<(usize, F)>, F); 3]> = r1cs
             .constraints
@@ -162,29 +160,46 @@ impl<F: PrimeField> Plonkifier<F> for GreedyBruteForcePlonkifier<F> {
 
         println!("Preparing initial relations");
 
-        for (constraint_idx, lcs) in constraints.iter_mut().enumerate() {
-            if constraint_idx % 1000 == 0 {
-                println!("Processing {}", constraint_idx);
-            }
-            for (lc_idx, (lc, _)) in lcs.iter_mut().enumerate() {
-                let inverses = &mut constraint_inverses[constraint_idx][lc_idx];
-                *inverses = lc.iter().map(|(_, coeff)| *coeff).collect::<Vec<_>>();
-                batch_inversion(inverses);
+        let chunk_size = constraints.len() / rayon::current_num_threads() / 8;
+        let mut relation_occurrences = constraints
+            .par_chunks_mut(chunk_size)
+            .zip(constraint_inverses.par_chunks_mut(chunk_size))
+            .enumerate()
+            .map(|(chunk_idx, (constraints, inverses))| {
+                let mut out = HashMap::new();
+                for (idx, lcs) in constraints.iter_mut().enumerate() {
+                    let constraint_idx = chunk_idx * chunk_size + idx;
+                    for (lc_idx, (lc, _)) in lcs.iter_mut().enumerate() {
+                        let inverses = &mut inverses[idx][lc_idx];
+                        *inverses = lc.iter().map(|(_, coeff)| *coeff).collect::<Vec<_>>();
+                        batch_inversion(inverses);
 
-                for i in 1..lc.len() {
-                    debug_assert_ne!(lc[i].0, lc[i - 1].0);
-                }
-                let len = lc.len();
-                for i in 0..len {
-                    for j in (i + 1)..len {
-                        relation_occurrences
-                            .entry((lc[i].0, lc[j].0, lc[j].1 * inverses[i]))
-                            .or_insert_with(|| Vec::new())
-                            .push((constraint_idx, lc_idx));
+                        for i in 1..lc.len() {
+                            debug_assert_ne!(lc[i].0, lc[i - 1].0);
+                        }
+                        let len = lc.len();
+                        for i in 0..len {
+                            for j in (i + 1)..len {
+                                out.entry((lc[i].0, lc[j].0, lc[j].1 * inverses[i]))
+                                    .or_insert_with(|| Vec::new())
+                                    .push((constraint_idx, lc_idx));
+                            }
+                        }
                     }
                 }
-            }
-        }
+                out
+            })
+            .reduce(
+                || HashMap::new(),
+                |mut a, b| {
+                    for (relation, mut occurrences) in b {
+                        a.entry(relation)
+                            .and_modify(|v| v.append(&mut occurrences))
+                            .or_insert_with(move || occurrences);
+                    }
+                    a
+                },
+            );
 
         // No new relations can ever be added for old varaibles so those terms are never necessary
         relation_occurrences.retain(|_, occurrences| occurrences.len() > 1);
@@ -205,7 +220,11 @@ impl<F: PrimeField> Plonkifier<F> for GreedyBruteForcePlonkifier<F> {
             let new_var = data.addition(var_a, var_b, coeff);
             count_constraints += 1;
             if count_constraints % 1000 == 0 {
-                println!("Written {} constraints, {} remaining", count_constraints, relation_queue.len());
+                println!(
+                    "Written {} constraints, {} remaining",
+                    count_constraints,
+                    relation_queue.len()
+                );
             }
 
             let mut updated_relations = HashMap::new();
