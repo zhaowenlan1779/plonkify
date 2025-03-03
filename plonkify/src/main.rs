@@ -2,8 +2,7 @@ use ark_bn254::Fr;
 use circom_compat::{read_witness, R1CSFile};
 use clap::Parser;
 use plonkify::{
-    vanilla::{GreedyBruteForcePlonkifier, OptimizedPlonkifier, SimplePlonkifer},
-    Plonkifier,
+    general::ExpandedCircuit, vanilla::{GreedyBruteForcePlonkifier, OptimizedPlonkifier, SimplePlonkifer}, Plonkifier
 };
 use std::fs::File;
 use std::io::BufReader;
@@ -32,6 +31,10 @@ fn main() {
     file.witness = read_witness::<Fr>(witness_reader);
 
     println!("R1CS num constraints: {}", file.header.n_constraints);
+
+    // let expanded = ExpandedCircuit::<Fr>::preprocess(&file);
+    // println!("Expanded circuit constraints: {}", expanded.constraints.len());
+    // return;
 
     let (plonkish_circuit, plonkish_witness) = match cli.optimize {
         0 => SimplePlonkifer::<Fr>::plonkify(&file),
