@@ -2,7 +2,7 @@ use ark_bn254::Fr;
 use circom_compat::{read_witness, R1CSFile};
 use clap::Parser;
 use plonkify::{
-    general::ExpandedCircuit, vanilla::{GreedyBruteForcePlonkifier, OptimizedPlonkifier, SimplePlonkifer}, Plonkifier
+    general::{ExpandedCircuit, ExpansionConfig}, vanilla::{GreedyBruteForcePlonkifier, OptimizedPlonkifier, SimplePlonkifer}, Plonkifier
 };
 use std::fs::File;
 use std::io::BufReader;
@@ -32,7 +32,7 @@ fn main() {
 
     println!("R1CS num constraints: {}", file.header.n_constraints);
 
-    // let expanded = ExpandedCircuit::<Fr>::preprocess(&file);
+    // let expanded = ExpandedCircuit::<Fr>::preprocess(&file, ExpansionConfig::MaxCost(10), 5);
     // println!("Expanded circuit constraints: {}", expanded.constraints.len());
     // return;
 

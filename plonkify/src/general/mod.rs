@@ -1,3 +1,3 @@
-mod bf_expansion;
-pub use bf_expansion::ExpandedCircuit;
+mod expansion;
+pub use expansion::{ExpandedCircuit, ExpansionConfig};
 mod simple;
