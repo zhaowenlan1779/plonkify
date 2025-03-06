@@ -5,7 +5,7 @@ use ark_poly::{
 };
 use circom_compat::R1CSFile;
 use rayon::prelude::*;
-use std::{cmp::Reverse, collections::HashSet};
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::iter::zip;
 use std::mem::take;
@@ -50,56 +50,61 @@ fn substitute<F: PrimeField>(
     cur: &SparsePolynomial<F, SparseTerm>,
     variable: usize,
     subst: &SparsePolynomial<F, SparseTerm>,
-) -> SparsePolynomial<F, SparseTerm> {
+) -> Option<SparsePolynomial<F, SparseTerm>> {
+    let is_zero = subst.is_zero();
+    let is_single_term = subst.terms.len() <= 1;
+    let mut already_used = false;
+
     let mut result_terms = Vec::new();
     for (coeff, term) in cur.terms.iter() {
         let item_to_subst = (**term).iter().find(|(var, _)| *var == variable);
         if let Some((_, power)) = item_to_subst {
-            let new_term = SparseTerm::new(
+            if is_zero {
+                continue;
+            }
+            if is_single_term {
+                let new_term = SparseTerm::new(
+                    (**term)
+                        .iter()
+                        .filter(|(var, _)| *var != variable)
+                        .map(|x| *x)
+                        .chain(subst.terms[0].1.iter().map(|(x, y)| (*x, *y * *power)))
+                        .collect::<Vec<_>>(),
+                );
+                result_terms.push((*coeff * subst.terms[0].0, new_term));
+                continue;
+            }
+
+            if *power > 1 || already_used {
+                // It's probably not worth it to inline
+                return None;
+            }
+            already_used = true;
+
+            let mut new_poly = subst.clone();
+            let remainder_term = SparseTerm::new(
                 (**term)
                     .iter()
                     .filter(|(var, _)| *var != variable)
                     .map(|x| *x)
                     .collect::<Vec<_>>(),
             );
-
-            let mut new_poly = if *power == 1 {
-                subst.clone()
-            } else {
-                // Exponentiation by squaring
-                let mut power = *power;
-                let mut multiplier = subst.clone();
-                let mut new_poly = SparsePolynomial::zero();
-                loop {
-                    if power % 2 == 1 {
-                        if new_poly.is_zero() {
-                            new_poly = multiplier.clone();
-                        } else {
-                            new_poly = naive_mul(&new_poly, &multiplier);
-                        }
-                    }
-
-                    power /= 2;
-                    if power > 0 {
-                        multiplier = naive_mul(&multiplier, &multiplier);
-                    } else {
-                        break;
-                    }
-                }
-                new_poly
-            };
-            poly_mul_by_term(&mut new_poly, *coeff, &new_term);
+            poly_mul_by_term(&mut new_poly, *coeff, &remainder_term);
             result_terms.append(&mut new_poly.terms);
         } else {
             result_terms.push((*coeff, term.clone()));
         }
     }
-    SparsePolynomial::from_coefficients_vec(cur.num_vars, result_terms)
+    Some(SparsePolynomial::from_coefficients_vec(
+        cur.num_vars,
+        result_terms,
+    ))
 }
 
 pub struct ExpandedCircuit<F: PrimeField> {
-    pub num_instance_variables: usize,
+    pub num_public_inputs: usize,
     pub constraints: Vec<SparsePolynomial<F, SparseTerm>>,
+    pub witness: Vec<F>,
 }
 
 fn get_poly_weight<F: PrimeField>(poly: &SparsePolynomial<F, SparseTerm>) -> usize {
@@ -125,20 +130,88 @@ impl ExpansionConfig {
             ExpansionConfig::MaxCost(max_cost) => get_poly_weight(poly) <= *max_cost,
         }
     }
-
-    fn check_poly_with_weight<F: PrimeField>(
-        &self,
-        poly: &SparsePolynomial<F, SparseTerm>,
-        weight: usize,
-    ) -> bool {
-        match self {
-            ExpansionConfig::None => true,
-            ExpansionConfig::MaxWidth(width) => poly.terms.len() <= *width,
-            ExpansionConfig::MaxDegree(degree) => poly.degree() <= *degree,
-            ExpansionConfig::MaxCost(max_cost) => weight <= *max_cost,
-        }
-    }
 }
+
+// struct GateInfo {
+//     num_terms: usize,
+//     num_witnesses: usize,
+//     degree: usize,
+//     width_degree: Vec<(usize, usize)>,
+// }
+
+// impl GateInfo {
+//     fn new(gate: &CustomizedGates) -> Self {
+//         let mut width_degree = vec![];
+//         for (_, _, variables) in &gate.gates {
+//             let mut sorted_vars = variables.clone();
+//             sorted_vars.sort();
+
+//             let mut width = 0;
+//             let mut degree = 0;
+//             let mut cur_degree = 0;
+//             for i in 0..sorted_vars.len() {
+//                 if i == 0 || variables[i] != variables[i - 1] {
+//                     width += 1;
+//                     cur_degree = 0;
+//                 } else {
+//                     cur_degree += 1;
+//                     degree = std::cmp::max(degree, cur_degree);
+//                 }
+//             }
+//             width_degree.push((width, degree));
+//         }
+//         Self {
+//             num_terms: gate.gates.len(),
+//             num_witnesses: gate.num_witness_columns(),
+//             degree: gate.degree(),
+//             width_degree,
+//         }
+//     }
+// }
+
+// fn is_constraint_expressable<F: PrimeField>(
+//     gate: &GateInfo,
+//     poly: &SparsePolynomial<F, SparseTerm>,
+// ) -> bool {
+//     if poly.terms.len() > gate.num_terms {
+//         return false;
+//     }
+//     if poly.degree() > gate.degree {
+//         return false;
+//     }
+
+//     let mut variables = poly
+//         .terms
+//         .iter()
+//         .flat_map(|(_, term)| (**term).iter().map(|(var, _)| *var).collect::<Vec<_>>())
+//         .collect::<Vec<_>>();
+//     variables.sort();
+
+//     let mut variables_deduped = Vec::new();
+//     for i in 0..variables.len() {
+//         if i == 0 || variables[i] != variables[i - 1] {
+//             variables_deduped.push(variables[i]);
+//         }
+//     }
+
+//     if variables.len() > gate.num_witnesses {
+//         return false;
+//     }
+
+//     // TODO: More checks
+//     for (_, term) in &poly.terms {
+//         let width = term.len();
+//         let degree = (**term).iter().map(|(_, power)| *power).max().unwrap_or(0);
+//         if !gate
+//             .width_degree
+//             .iter()
+//             .any(|(gate_width, gate_degree)| width <= *gate_width && degree <= *gate_degree)
+//         {
+//             return false;
+//         }
+//     }
+//     true
+// }
 
 impl<F: PrimeField> ExpandedCircuit<F> {
     fn poly_from_lc(lc: &[(usize, F)]) -> SparsePolynomial<F, SparseTerm> {
@@ -157,16 +230,22 @@ impl<F: PrimeField> ExpandedCircuit<F> {
         )
     }
 
+    fn evaluate_lc(lc: &[(usize, F)], witness: &[F]) -> F {
+        lc.iter()
+            .map(|(var, coeff)| *coeff * witness[*var])
+            .sum::<F>()
+    }
+
     // (linear terms, dependencies)
     fn get_constraint_dependencies(
-        num_instance_variables: usize,
+        num_public_input: usize,
         constraint_poly: &SparsePolynomial<F, SparseTerm>,
     ) -> (BTreeSet<usize>, BTreeSet<usize>) {
         let mut linear_terms = BTreeSet::new();
         let mut high_order_dependencies = BTreeSet::new();
         for (_, term) in &constraint_poly.terms {
             for (var, deg) in &**term {
-                if *var < num_instance_variables {
+                if *var < num_public_input {
                     continue;
                 }
                 if *deg > 1 || term.len() > 1 {
@@ -204,27 +283,33 @@ impl<F: PrimeField> ExpandedCircuit<F> {
         poly
     }
 
-    pub fn preprocess(r1cs: &R1CSFile<F>, config: ExpansionConfig, max_lc_width: usize) -> Self {
-        let num_instance_variables =
-            (r1cs.header.n_pub_in + r1cs.header.n_pub_out + r1cs.header.n_prv_in + 1) as usize;
-        let mut num_vars = r1cs.header.n_wires as usize;
+    pub fn preprocess(r1cs: &R1CSFile<F>, config: ExpansionConfig) -> Self {
+        let num_public_input = (r1cs.header.n_pub_in + r1cs.header.n_pub_out + 1) as usize;
+        let mut witness = r1cs.witness.clone();
 
         let mut constraint_polys = r1cs
             .constraints
             .iter()
             .flat_map(|(a, b, c)| {
                 let mut out_polys = vec![];
+
+                // Heuristic
+                let count_vars_a = a.iter().filter(|(var, _)| *var != 0).count();
+                let count_vars_b = b.iter().filter(|(var, _)| *var != 0).count();
+                let should_try_outline = count_vars_a >= 2 && count_vars_b >= 2;
+
                 let mut maybe_outline_poly = |lc: &Vec<(usize, F)>| {
                     let mut poly = Self::poly_from_lc(lc);
-                    if poly.terms.len() > max_lc_width {
+                    // Heuristic...
+                    if should_try_outline && lc.iter().filter(|(var, _)| *var != 0).count() >= 3 {
                         poly.terms
-                            .push((-F::one(), SparseTerm::new(vec![(num_vars, 1)])));
+                            .push((-F::one(), SparseTerm::new(vec![(witness.len(), 1)])));
                         out_polys.push(take(&mut poly));
                         poly = SparsePolynomial::from_coefficients_vec(
                             usize::MAX,
-                            vec![(F::one(), SparseTerm::new(vec![(num_vars, 1)]))],
+                            vec![(F::one(), SparseTerm::new(vec![(witness.len(), 1)]))],
                         );
-                        num_vars += 1;
+                        witness.push(Self::evaluate_lc(lc, &witness));
                     }
                     poly
                 };
@@ -236,9 +321,12 @@ impl<F: PrimeField> ExpandedCircuit<F> {
                 out_polys
             })
             .collect::<Vec<_>>();
+        println!("Outlined number constraints: {}", constraint_polys.len());
+        println!("Num terms: {}", constraint_polys.iter().map(|x| x.terms.len()).sum::<usize>());
+
         let mut dependencies_list = constraint_polys
             .par_iter()
-            .map(|poly| Self::get_constraint_dependencies(num_instance_variables, poly))
+            .map(|poly| Self::get_constraint_dependencies(num_public_input, poly))
             .collect::<Vec<_>>();
 
         let mut dependent_map: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -251,14 +339,33 @@ impl<F: PrimeField> ExpandedCircuit<F> {
                     .or_insert_with(|| Vec::new())
                     .push(i);
             }
+        }
+        let maybe_enqueue = |queue: &mut BinaryHeap<(Reverse<usize>, usize)>,
+                             dependent_map: &mut HashMap<usize, Vec<usize>>,
+                             i,
+                             linear_terms: &BTreeSet<usize>,
+                             dependencies: &BTreeSet<usize>| {
             if dependencies.len() > 0 {
-                continue;
+                return;
             }
             if linear_terms.len() == 0 {
                 queue.push((Reverse(0), i));
             } else if linear_terms.len() == 1 {
-                queue.push((Reverse(get_poly_weight(&constraint_polys[i])), i))
+                let var = linear_terms.first().unwrap();
+                queue.push((
+                    Reverse(dependent_map.get(var).map(|x| x.len()).unwrap_or(0)),
+                    i,
+                ));
             }
+        };
+        for (i, (linear_terms, dependencies)) in dependencies_list.iter().enumerate() {
+            maybe_enqueue(
+                &mut queue,
+                &mut dependent_map,
+                i,
+                linear_terms,
+                dependencies,
+            );
         }
         for (idx, dependents) in &dependent_map {
             dependent_queue.insert((Reverse(dependents.len()), *idx));
@@ -267,18 +374,15 @@ impl<F: PrimeField> ExpandedCircuit<F> {
         let mut out_constraints = vec![];
         let mut processed_constraints = 0;
         let mut visited = vec![false; constraint_polys.len()];
+
         loop {
             while !queue.is_empty() {
-                let (cost, idx) = queue.pop().unwrap();
+                let (_, idx) = queue.pop().unwrap();
                 if visited[idx] {
                     continue;
                 }
                 visited[idx] = true;
-
                 processed_constraints += 1;
-                if processed_constraints % 1000 == 0 {
-                    println!("Processed {} constraints", processed_constraints);
-                }
 
                 if constraint_polys[idx].is_zero() {
                     continue;
@@ -290,27 +394,54 @@ impl<F: PrimeField> ExpandedCircuit<F> {
                     continue;
                 }
 
-                let should_inline = config.check_poly_with_weight(&constraint_polys[idx], cost.0);
+                let new_var = *linear_terms.first().unwrap();
+                let dependents = dependent_map.remove(&new_var);
+                let num_dependents = dependents.as_ref().map(|x| x.len()).unwrap_or(0);
+
+                // It's generally not worth it to inline if there are more than one usage
+                // (since it must be repeated at each instance)
+                // Note that self always counts as a dependent
+                let should_inline =
+                    num_dependents <= 2 && config.check_poly(&constraint_polys[idx]);
                 if !should_inline {
                     out_constraints.push(take(&mut constraint_polys[idx]));
                 }
 
                 debug_assert_eq!(linear_terms.len(), 1);
-
-                let new_var = *linear_terms.first().unwrap();
-                dependent_map.remove(&new_var).map(|dependents| {
+                dependents.map(|dependents| {
                     let removed = dependent_queue.remove(&(Reverse(dependents.len()), new_var));
                     debug_assert!(removed);
 
                     if should_inline {
                         let subst =
-                            Self::solve_for_variable(take(&mut constraint_polys[idx]), new_var);
-                        let new_constraint_polys = dependents
-                            .par_iter()
-                            .map(|idx| substitute(&constraint_polys[*idx], new_var, &subst))
-                            .collect::<Vec<_>>();
-                        for (idx, poly) in zip(&dependents, new_constraint_polys) {
-                            constraint_polys[*idx] = poly;
+                            Self::solve_for_variable(constraint_polys[idx].clone(), new_var);
+                        let mut new_constraint_polys =
+                            vec![SparsePolynomial::zero(); dependents.len()];
+                        let is_inlined = dependents
+                            .iter()
+                            .zip(&mut new_constraint_polys)
+                            .try_for_each(|(idx, out_poly)| {
+                                if !config.check_poly(&constraint_polys[*idx]) {
+                                    return None;
+                                }
+                                let new_poly = substitute(&constraint_polys[*idx], new_var, &subst);
+                                if let Some(new_poly) = new_poly {
+                                    if !config.check_poly(&new_poly) {
+                                        return None;
+                                    }
+
+                                    *out_poly = new_poly;
+                                    Some(())
+                                } else {
+                                    None
+                                }
+                            });
+                        if is_inlined == None {
+                            out_constraints.push(take(&mut constraint_polys[idx]));
+                        } else {
+                            for (idx, new_poly) in zip(&dependents, new_constraint_polys) {
+                                constraint_polys[*idx] = new_poly;
+                            }
                         }
                     }
 
@@ -323,15 +454,13 @@ impl<F: PrimeField> ExpandedCircuit<F> {
                         linear_terms.remove(&new_var);
                         dependencies.remove(&new_var);
 
-                        if dependencies.len() > 0 {
-                            continue;
-                        }
-
-                        if linear_terms.len() == 0 {
-                            queue.push((Reverse(0), *idx));
-                        } else if linear_terms.len() == 1 {
-                            queue.push((Reverse(get_poly_weight(&constraint_polys[*idx])), *idx))
-                        }
+                        maybe_enqueue(
+                            &mut queue,
+                            &mut dependent_map,
+                            *idx,
+                            linear_terms,
+                            dependencies,
+                        );
                     }
                 });
             }
@@ -353,22 +482,23 @@ impl<F: PrimeField> ExpandedCircuit<F> {
                     linear_terms.remove(&var);
                     dependencies.remove(&var);
 
-                    if dependencies.len() > 0 {
-                        continue;
-                    }
-
-                    if linear_terms.len() == 0 {
-                        queue.push((Reverse(0), idx));
-                    } else if linear_terms.len() == 1 {
-                        queue.push((Reverse(get_poly_weight(&constraint_polys[idx])), idx))
-                    }
+                    maybe_enqueue(
+                        &mut queue,
+                        &mut dependent_map,
+                        idx,
+                        linear_terms,
+                        dependencies,
+                    );
                 }
             }
         }
 
+        println!("Num terms: {}", out_constraints.iter().map(|x| x.terms.len()).sum::<usize>());
+
         Self {
-            num_instance_variables,
+            num_public_inputs: num_public_input,
             constraints: out_constraints,
+            witness,
         }
     }
 }
@@ -377,151 +507,9 @@ impl<F: PrimeField> ExpandedCircuit<F> {
 mod tests {
     use super::*;
     use ark_bn254::Fr;
-    use circom_compat::Header;
+    // use circom_compat::Header;
     use std::fs::File;
     use std::io::BufReader;
-
-    #[test]
-    fn test_sample() {
-        let from_u64 = |x: u64| -> Fr { Fr::from_u64(x).unwrap() };
-
-        // (4x + 8)(6x + 8) = 8a_1
-        // (a_1)(a_1) = a_2
-        // (a_1 + a_3)(a_2 + a_3) = a_3 + 5
-        // (a_2)(3a_1) = a_3 + 2
-        let r1cs = R1CSFile {
-            version: 0,
-            header: Header {
-                n_pub_in: 1,
-                n_pub_out: 0,
-                n_prv_in: 0,
-                field_size: 0,
-                prime_size: vec![],
-                n_wires: 5,
-                n_constraints: 4,
-                n_labels: 0,
-            },
-            constraints: vec![
-                (
-                    vec![(0, from_u64(8)), (1, from_u64(4))],
-                    vec![(0, from_u64(8)), (1, from_u64(6))],
-                    vec![(2, from_u64(8))],
-                ),
-                (
-                    vec![(2, from_u64(1))],
-                    vec![(2, from_u64(1))],
-                    vec![(3, from_u64(1))],
-                ),
-                (
-                    vec![(2, from_u64(1)), (4, from_u64(1))],
-                    vec![(3, from_u64(1)), (4, from_u64(1))],
-                    vec![(4, from_u64(1)), (0, from_u64(5))],
-                ),
-                (
-                    vec![(3, from_u64(1))],
-                    vec![(2, from_u64(3))],
-                    vec![(4, from_u64(1)), (0, from_u64(2))],
-                ),
-            ],
-            wire_mapping: vec![],
-            witness: vec![],
-        };
-        let result = ExpandedCircuit::<Fr>::preprocess(&r1cs, ExpansionConfig::None, 5);
-        assert_eq!(result.constraints.len(), 1);
-        let expected_result = SparsePolynomial::from_coefficients_vec(
-            2,
-            vec![
-                (from_u64(2462577), SparseTerm::new(vec![])),
-                (from_u64(18343340), SparseTerm::new(vec![(1, 1)])),
-                (from_u64(62416402), SparseTerm::new(vec![(1, 2)])),
-                (from_u64(128310040), SparseTerm::new(vec![(1, 3)])),
-                (from_u64(177498006), SparseTerm::new(vec![(1, 4)])),
-                (from_u64(174079740), SparseTerm::new(vec![(1, 5)])),
-                (from_u64(124112574), SparseTerm::new(vec![(1, 6)])),
-                (from_u64(64814040), SparseTerm::new(vec![(1, 7)])),
-                (from_u64(24604803), SparseTerm::new(vec![(1, 8)])),
-                (from_u64(6621750), SparseTerm::new(vec![(1, 9)])),
-                (from_u64(1199205), SparseTerm::new(vec![(1, 10)])),
-                (from_u64(131220), SparseTerm::new(vec![(1, 11)])),
-                (from_u64(6561), SparseTerm::new(vec![(1, 12)])),
-            ],
-        );
-        assert_eq!(result.constraints[0].terms, expected_result.terms);
-    }
-
-    #[test]
-    fn test_bivariate() {
-        let from_u64 = |x: u64| -> Fr { Fr::from_u64(x).unwrap() };
-
-        // (4x + 8)(6y + 8) = 8a_1
-        // (a_1 + a_2)(a_2) = x + 5
-        // (a_1)(3a_1) = a_2 + 2
-        let r1cs = R1CSFile {
-            version: 0,
-            header: Header {
-                n_pub_in: 1,
-                n_pub_out: 1,
-                n_prv_in: 0,
-                field_size: 0,
-                prime_size: vec![],
-                n_wires: 5,
-                n_constraints: 3,
-                n_labels: 0,
-            },
-            constraints: vec![
-                (
-                    vec![(0, from_u64(8)), (1, from_u64(4))],
-                    vec![(0, from_u64(8)), (2, from_u64(6))],
-                    vec![(3, from_u64(8))],
-                ),
-                (
-                    vec![(3, from_u64(1)), (4, from_u64(1))],
-                    vec![(4, from_u64(1))],
-                    vec![(1, from_u64(1)), (0, from_u64(5))],
-                ),
-                (
-                    vec![(3, from_u64(1))],
-                    vec![(3, from_u64(3))],
-                    vec![(4, from_u64(1)), (0, from_u64(2))],
-                ),
-            ],
-            wire_mapping: vec![],
-            witness: vec![],
-        };
-        let result = ExpandedCircuit::<Fr>::preprocess(&r1cs, ExpansionConfig::None, 5);
-        assert_eq!(result.constraints.len(), 1);
-        let expected_result = SparsePolynomial::from_coefficients_vec(
-            3,
-            vec![
-                (from_u64(37615), SparseTerm::new(vec![])),
-                (from_u64(112884), SparseTerm::new(vec![(2, 1)])),
-                (from_u64(75255), SparseTerm::new(vec![(1, 1)])),
-                (from_u64(126576), SparseTerm::new(vec![(2, 2)])),
-                (from_u64(225210), SparseTerm::new(vec![(1, 1), (2, 1)])),
-                (from_u64(56256), SparseTerm::new(vec![(1, 2)])),
-                (from_u64(62856), SparseTerm::new(vec![(2, 3)])),
-                (from_u64(252288), SparseTerm::new(vec![(1, 1), (2, 2)])),
-                (from_u64(168192), SparseTerm::new(vec![(1, 2), (2, 1)])),
-                (from_u64(18624), SparseTerm::new(vec![(1, 3)])),
-                (from_u64(11664), SparseTerm::new(vec![(2, 4)])),
-                (from_u64(125388), SparseTerm::new(vec![(1, 1), (2, 3)])),
-                (from_u64(188460), SparseTerm::new(vec![(1, 2), (2, 2)])),
-                (from_u64(55728), SparseTerm::new(vec![(1, 3), (2, 1)])),
-                (from_u64(2304), SparseTerm::new(vec![(1, 4)])),
-                (from_u64(23328), SparseTerm::new(vec![(1, 1), (2, 4)])),
-                (from_u64(93798), SparseTerm::new(vec![(1, 2), (2, 3)])),
-                (from_u64(62532), SparseTerm::new(vec![(1, 3), (2, 2)])),
-                (from_u64(6912), SparseTerm::new(vec![(1, 4), (2, 1)])),
-                (from_u64(17496), SparseTerm::new(vec![(1, 2), (2, 4)])),
-                (from_u64(31185), SparseTerm::new(vec![(1, 3), (2, 3)])),
-                (from_u64(7776), SparseTerm::new(vec![(1, 4), (2, 2)])),
-                (from_u64(5832), SparseTerm::new(vec![(1, 3), (2, 4)])),
-                (from_u64(3888), SparseTerm::new(vec![(1, 4), (2, 3)])),
-                (from_u64(729), SparseTerm::new(vec![(1, 4), (2, 4)])),
-            ],
-        );
-        assert_eq!(result.constraints[0].terms, expected_result.terms);
-    }
 
     #[test]
     fn test_circuit() {
@@ -529,7 +517,7 @@ mod tests {
         let file = R1CSFile::<Fr>::new(reader).unwrap();
         println!("R1CS num constraints: {}", file.header.n_constraints);
 
-        let result = ExpandedCircuit::<Fr>::preprocess(&file, ExpansionConfig::MaxCost(10), 5);
+        let result = ExpandedCircuit::<Fr>::preprocess(&file, ExpansionConfig::MaxCost(10));
         println!(
             "Expanded circuit num constraints: {}",
             result.constraints.len()
