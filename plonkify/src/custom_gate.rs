@@ -4,8 +4,8 @@
 // You should have received a copy of the MIT License
 // along with the HyperPlonk library. If not, see <https://mit-license.org/>.
 
-use ark_std::cmp::max;
 use ark_ff::PrimeField;
+use ark_std::cmp::max;
 
 /// Customized gate is a list of tuples of
 ///     (coefficient, selector_index, wire_indices)
@@ -29,6 +29,8 @@ use ark_ff::PrimeField;
 /// id_w2 = 1 // second witness
 ///
 /// NOTE: here coeff is a signed integer, instead of a field element
+///
+/// Customized gates structure from HyperPlonk.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CustomizedGates {
     pub gates: Vec<(i64, Option<usize>, Vec<usize>)>,
@@ -209,5 +211,107 @@ impl CustomizedGates {
                 (1, Some(6), vec![]),
             ],
         }
+    }
+}
+
+// Gate structure that we use
+pub struct GateInfo {
+    pub gates: Vec<Vec<(usize, usize)>>,
+    pub is_linear: Vec<bool>,
+    // This describes the 'equivalence' of the variables
+    // Assuming that the variables are sorted, e.g. [1, 2, 3, 4], which
+    // orders should we try to cover all possiblilities? If all variables
+    // are equivalent, there is only one order required ([0, 1, 2, 3])
+    pub orders: Vec<Vec<usize>>,
+    pub linear_terms: Vec<(usize, usize)>,
+}
+
+impl GateInfo {
+    /// The number of selectors in a customized gate
+    pub fn num_selector_columns(&self) -> usize {
+        // Output gate and constant gate
+        self.gates.len() + 2
+    }
+
+    /// The number of witnesses in a customized gate
+    pub fn num_witness_columns(&self) -> usize {
+        let mut res = 0;
+        for ws in self.gates.iter() {
+            // witness list must be ordered
+            // so we just need to compare with the last one
+            if let Some(&(var, _)) = ws.last() {
+                if res < var {
+                    res = var
+                }
+            }
+        }
+        // add one here because index starts from 0
+        // and one more here because the output is not included
+        res + 2
+    }
+
+    // pub fn new(gate: &CustomizedGates) -> Self {
+    //     let num_witnesses = gate.num_witness_columns();
+    //     let gates = gate.gates.iter().map(
+    //         |(coeff, q, variables)| {
+    //             let mut out_gate = vec![];
+    //             for i in 0..variables.len() {
+    //                 if i == 0 || variables[i] != variables[i - 1] {
+    //                     out_gate.push((variables[i], 0usize));
+    //                 }
+    //                 out_gate.last_mut().unwrap().1 += 1;
+    //             }
+    //             out_gate
+    //         }
+    //     ).collect::<Vec<_>>();
+
+
+    // }
+
+    pub fn jellyfish_turbo_plonk_gate() -> Self {
+        Self {
+            gates: vec![
+                (vec![(0, 1)]),
+                (vec![(1, 1)]),
+                (vec![(2, 1)]),
+                (vec![(3, 1)]),
+                (vec![(0, 1), (1, 1)]),
+                (vec![(2, 1), (3, 1)]),
+                (vec![(0, 5)]),
+                (vec![(1, 5)]),
+                (vec![(2, 5)]),
+                (vec![(3, 5)]),
+                (vec![(0, 1), (1, 1), (2, 1), (3, 1)]),
+            ],
+            is_linear: vec![true, true, true, true, false, false, false, false, false, false, false],
+            // gate_priority: vec![6, 7, 8, 9, 10, 4, 5, 0, 1, 2, 3],
+            orders: vec![vec![0, 1, 2, 3], vec![0, 2, 1, 3], vec![1, 2, 0, 3]],
+            linear_terms: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+        }
+    }
+
+    pub fn evaluate_no_output<F: PrimeField>(&self, selectors: &[F], witness: &[F], variables: &[usize]) -> F {
+        self.gates.iter().zip(selectors.iter()).map(|(gate, selector)| {
+            if selector.is_zero() {
+                F::zero()
+            } else {
+            gate.iter().map(|(idx, power)| {
+                witness[variables[*idx]].pow([*power as u64])
+            }).product::<F>() * selector
+        }
+        }).sum::<F>() + selectors.last().unwrap()
+    }
+
+    pub fn evaluate<F: PrimeField>(&self, selectors: &[F], witness: &[F], variables: &[usize]) -> F {
+        let selector_len = selectors.len();
+        self.gates.iter().zip(selectors.iter()).map(|(gate, selector)| {
+            if selector.is_zero() {
+                F::zero()
+            } else {
+            gate.iter().map(|(idx, power)| {
+                witness[variables[*idx]].pow([*power as u64])
+            }).product::<F>() * selector
+        }
+        }).sum::<F>() + selectors[selector_len - 2] * witness[*variables.last().unwrap()] + selectors.last().unwrap()
     }
 }
