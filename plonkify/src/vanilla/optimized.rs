@@ -110,24 +110,27 @@ impl<F: PrimeField> OptimizedPlonkifier<F> {
             let mut variables = variables
                 .iter()
                 .filter(|(idx, coeff)| *idx != 0 && !coeff.is_zero())
-                .map(|x| *x)
+                .map(|(var, coeff)| (*var, *coeff, *var))
                 .collect::<Vec<_>>();
-            variables.sort_by_key(|(idx, _)| *idx);
+            variables.sort_by_key(|(idx, _, _)| *idx);
 
             let mut k = 1;
             let mut additions = 0;
             loop {
                 let mask = !((1 << k) - 1);
-                let mut last_index = None;
+                let mut last_index : Option<usize> = None;
                 for i in 0..variables.len() {
                     if variables[i].1.is_zero() {
                         continue;
                     }
                     if let Some(last) = last_index {
-                        let (last_var, _) = variables[last];
-                        if (last_var & mask) == (variables[i].0 & mask) {
-                            variables[last] = self.addition(variables[last], variables[i]);
-                            variables[i] = (0, F::zero());
+                        let (last_var, last_coeff, last_effective_index) = variables[last];
+                        if (last_effective_index & mask) == (variables[i].2 & mask) {
+                            let (var, coeff) = self
+                                .addition((last_var, last_coeff), (variables[i].0, variables[i].1));
+                            variables[last].0 = var;
+                            variables[last].1 = coeff;
+                            variables[i] = (0, F::zero(), 0);
                             additions += 1;
                         } else {
                             last_index = Some(i);
