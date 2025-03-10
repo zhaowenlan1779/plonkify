@@ -223,7 +223,10 @@ pub struct GateInfo {
     // orders should we try to cover all possiblilities? If all variables
     // are equivalent, there is only one order required ([0, 1, 2, 3])
     pub orders: Vec<Vec<usize>>,
+    // (var, selector)
     pub linear_terms: Vec<(usize, usize)>,
+    // For linear-only; (var1, var2, selector_1, selector_2, selector_mul)
+    pub vanilla_compatibility_info: (usize, usize, usize, usize, usize),
 }
 
 impl GateInfo {
@@ -265,7 +268,6 @@ impl GateInfo {
     //         }
     //     ).collect::<Vec<_>>();
 
-
     // }
 
     pub fn jellyfish_turbo_plonk_gate() -> Self {
@@ -283,35 +285,61 @@ impl GateInfo {
                 (vec![(3, 5)]),
                 (vec![(0, 1), (1, 1), (2, 1), (3, 1)]),
             ],
-            is_linear: vec![true, true, true, true, false, false, false, false, false, false, false],
+            is_linear: vec![
+                true, true, true, true, false, false, false, false, false, false, false,
+            ],
             // gate_priority: vec![6, 7, 8, 9, 10, 4, 5, 0, 1, 2, 3],
             orders: vec![vec![0, 1, 2, 3], vec![0, 2, 1, 3], vec![1, 2, 0, 3]],
             linear_terms: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            vanilla_compatibility_info: (0, 1, 0, 1, 4),
         }
     }
 
-    pub fn evaluate_no_output<F: PrimeField>(&self, selectors: &[F], witness: &[F], variables: &[usize]) -> F {
-        self.gates.iter().zip(selectors.iter()).map(|(gate, selector)| {
-            if selector.is_zero() {
-                F::zero()
-            } else {
-            gate.iter().map(|(idx, power)| {
-                witness[variables[*idx]].pow([*power as u64])
-            }).product::<F>() * selector
-        }
-        }).sum::<F>() + selectors.last().unwrap()
+    pub fn evaluate_no_output<F: PrimeField>(
+        &self,
+        selectors: &[F],
+        witness: &[F],
+        variables: &[usize],
+    ) -> F {
+        self.gates
+            .iter()
+            .zip(selectors.iter())
+            .map(|(gate, selector)| {
+                if selector.is_zero() {
+                    F::zero()
+                } else {
+                    gate.iter()
+                        .map(|(idx, power)| witness[variables[*idx]].pow([*power as u64]))
+                        .product::<F>()
+                        * selector
+                }
+            })
+            .sum::<F>()
+            + selectors.last().unwrap()
     }
 
-    pub fn evaluate<F: PrimeField>(&self, selectors: &[F], witness: &[F], variables: &[usize]) -> F {
+    pub fn evaluate<F: PrimeField>(
+        &self,
+        selectors: &[F],
+        witness: &[F],
+        variables: &[usize],
+    ) -> F {
         let selector_len = selectors.len();
-        self.gates.iter().zip(selectors.iter()).map(|(gate, selector)| {
-            if selector.is_zero() {
-                F::zero()
-            } else {
-            gate.iter().map(|(idx, power)| {
-                witness[variables[*idx]].pow([*power as u64])
-            }).product::<F>() * selector
-        }
-        }).sum::<F>() + selectors[selector_len - 2] * witness[*variables.last().unwrap()] + selectors.last().unwrap()
+        self.gates
+            .iter()
+            .zip(selectors.iter())
+            .map(|(gate, selector)| {
+                if selector.is_zero() {
+                    F::zero()
+                } else {
+                    gate.iter()
+                        .map(|(idx, power)| witness[variables[*idx]].pow([*power as u64]))
+                        .product::<F>()
+                        * selector
+                }
+            })
+            .sum::<F>()
+            + selectors[selector_len - 2] * witness[*variables.last().unwrap()]
+            + selectors.last().unwrap()
     }
 }

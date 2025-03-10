@@ -4,11 +4,13 @@ use std::collections::BTreeSet;
 use crate::{
     circuit::{PlonkishCircuit, PlonkishCircuitParams},
     custom_gate::{CustomizedGates, GateInfo},
+    general::ExpansionConfig,
     plonkify::GeneralPlonkifer,
     selectors::SelectorColumn,
 };
 use ark_ff::PrimeField;
 use ark_poly::multivariate::{SparsePolynomial, SparseTerm, Term};
+use circom_compat::R1CSFile;
 
 use super::ExpandedCircuit;
 
@@ -577,10 +579,13 @@ impl<F: PrimeField> SimpleGeneralPlonkifier<F> {
 }
 
 impl<F: PrimeField> GeneralPlonkifer<F> for SimpleGeneralPlonkifier<F> {
-    fn plonkify(
-        circuit: &ExpandedCircuit<F>,
-        gate: &CustomizedGates,
-    ) -> (PlonkishCircuit<F>, Vec<F>) {
+    fn plonkify(r1cs: &R1CSFile<F>, gate: &CustomizedGates) -> (PlonkishCircuit<F>, Vec<F>) {
+        let circuit = ExpandedCircuit::<F>::preprocess(&r1cs, ExpansionConfig::MaxCost(50));
+        println!(
+            "Expanded circuit constraints: {}",
+            circuit.constraints.len()
+        );
+
         let mut data = Self {
             constraint_selectors: vec![SelectorColumn::<F>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
