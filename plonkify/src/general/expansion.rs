@@ -5,10 +5,10 @@ use ark_poly::{
 };
 use circom_compat::R1CSFile;
 use rayon::prelude::*;
-use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::iter::zip;
 use std::mem::take;
+use std::{cmp::Reverse, collections::BTreeMap};
 
 pub(super) fn term_mul_by_term(cur: &SparseTerm, other: &SparseTerm) -> SparseTerm {
     if cur.is_empty() {
@@ -126,8 +126,7 @@ fn get_poly_weight<F: PrimeField>(poly: &SparsePolynomial<F, SparseTerm>) -> usi
 
 pub enum ExpansionConfig {
     None,
-    MaxWidth(usize),
-    MaxDegree(usize),
+    MaxWidthDegree((usize, usize)),
     MaxCost(usize),
 }
 
@@ -135,8 +134,9 @@ impl ExpansionConfig {
     fn check_poly<F: PrimeField>(&self, poly: &SparsePolynomial<F, SparseTerm>) -> bool {
         match self {
             ExpansionConfig::None => true,
-            ExpansionConfig::MaxWidth(width) => poly.terms.len() <= *width,
-            ExpansionConfig::MaxDegree(degree) => poly.degree() <= *degree,
+            ExpansionConfig::MaxWidthDegree((width, degree)) => {
+                poly.terms.len() <= *width && poly.degree() <= *degree
+            }
             ExpansionConfig::MaxCost(max_cost) => get_poly_weight(poly) <= *max_cost,
         }
     }
@@ -169,14 +169,20 @@ impl<F: PrimeField> ExpandedCircuit<F> {
     fn get_constraint_dependencies(
         num_public_input: usize,
         constraint_poly: &SparsePolynomial<F, SparseTerm>,
-    ) -> (BTreeSet<usize>, BTreeSet<usize>) {
+    ) -> (BTreeSet<usize>, BTreeMap<usize, usize>) {
         let mut linear_terms = BTreeSet::new();
         let mut high_order_dependencies = BTreeSet::new();
+        let mut total_counts = BTreeMap::new();
         for (_, term) in &constraint_poly.terms {
             for (var, deg) in &**term {
                 if *var < num_public_input {
                     continue;
                 }
+
+                total_counts
+                    .entry(*var)
+                    .and_modify(|prev_count| *prev_count += 1)
+                    .or_insert(1);
                 if *deg > 1 || term.len() > 1 {
                     linear_terms.remove(var);
                     high_order_dependencies.insert(*var);
@@ -187,7 +193,8 @@ impl<F: PrimeField> ExpandedCircuit<F> {
                 }
             }
         }
-        (linear_terms, high_order_dependencies)
+        total_counts.retain(|var, _| high_order_dependencies.contains(var));
+        (linear_terms, total_counts)
     }
 
     fn solve_for_variable(
@@ -212,60 +219,177 @@ impl<F: PrimeField> ExpandedCircuit<F> {
         poly
     }
 
+    // const HASH_BASE_1: u64 = 97;
+    // const HASH_BASE_2: u64 = 389;
+    // const HASH_MODULUS: u64 = 1610612741;
+
+    // fn get_hash_value(coeff: &F, term: &SparseTerm) -> u64 {
+    //     let mut out = 0;
+    //     for limb in coeff.into_bigint().as_ref() {
+    //         out = (out * Self::HASH_BASE_1 + *limb) % Self::HASH_MODULUS;
+    //     }
+    //     for (var, power) in &**term {
+    //         out = (out * Self::HASH_BASE_1 + (*var as u64)) % Self::HASH_MODULUS;
+    //         out = (out * Self::HASH_BASE_1 + (*power as u64)) % Self::HASH_MODULUS;
+    //     }
+    //     out
+    // }
+
+    // fn get_hash_prefix(poly: &SparsePolynomial<F, SparseTerm>) -> Vec<u64> {
+    //     assert!(!poly.terms.is_empty());
+
+    //     let mut out_values = Vec::with_capacity(poly.terms.len());
+    //     let mut cur_value = 0;
+    //     let multiplier = poly.terms[0].0.inverse().unwrap();
+    //     for (coeff, term) in &poly.terms {
+    //         cur_value = (cur_value * Self::HASH_BASE_2
+    //             + Self::get_hash_value(&(*coeff * multiplier), term))
+    //             % Self::HASH_MODULUS;
+    //         out_values.push(cur_value);
+    //     }
+    //     out_values
+    // }
+
+    fn try_optimize_lc(
+        sub_poly: &SparsePolynomial<F, SparseTerm>,
+        parent_poly: &mut SparsePolynomial<F, SparseTerm>,
+    ) -> bool {
+        if parent_poly.terms.len() < sub_poly.terms.len() || sub_poly.terms.len() <= 2 {
+            return false;
+        }
+        let parent_poly_last_term = &parent_poly.terms[parent_poly.terms.len() - 2].1;
+        let sub_poly_last_term = &sub_poly.terms[sub_poly.terms.len() - 2].1;
+        if parent_poly_last_term < sub_poly_last_term {
+            return false;
+        }
+
+        let mut sub_idx = 0;
+        let mut result_terms = vec![];
+        let mut multiplier = F::zero();
+        for (coeff, term) in &parent_poly.terms[..parent_poly.terms.len() - 1] {
+            if sub_idx >= sub_poly.terms.len() - 1 {
+                result_terms.push((*coeff, term.clone()));
+                continue;
+            }
+
+            let (sub_coeff, sub_term) = &sub_poly.terms[sub_idx];
+            if sub_term < term {
+                // We are missing terms
+                return false;
+            }
+            if sub_term > term {
+                result_terms.push((*coeff, term.clone()));
+                continue;
+            }
+
+            if multiplier.is_zero() {
+                multiplier = *coeff * sub_coeff.inverse().unwrap();
+            } else if *sub_coeff * multiplier != *coeff {
+                return false;
+            }
+            sub_idx += 1;
+        }
+        if sub_idx < sub_poly.terms.len() - 1 {
+            return false;
+        }
+        let (last_coeff, last_term) = sub_poly.terms.last().unwrap();
+        result_terms.push((-*last_coeff * multiplier, last_term.clone()));
+        result_terms.push(parent_poly.terms.last().unwrap().clone());
+        *parent_poly = SparsePolynomial::from_coefficients_vec(parent_poly.num_vars, result_terms);
+
+        true
+    }
+
+    // (num_terms, poly_index)
+    fn optimize_outlined_lcs(
+        polys: &mut Vec<SparsePolynomial<F, SparseTerm>>,
+        mut lcs: Vec<(usize, usize)>,
+    ) {
+        lcs.sort_by_key(|(num_terms, _)| *num_terms);
+
+        #[derive(PartialEq, Eq)]
+        struct QueueItem<F: PrimeField>(usize, usize, SparsePolynomial<F, SparseTerm>);
+        impl<F: PrimeField> PartialOrd for QueueItem<F> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl<F: PrimeField> Ord for QueueItem<F> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.0.cmp(&other.0).reverse().then(self.1.cmp(&other.1))
+            }
+        }
+
+        let mut lcs_queue = BTreeSet::new();
+        let mut total_processed = 0;
+        for (_, poly_index) in lcs.iter() {
+            assert!(polys[*poly_index].terms.len() >= 2);
+            let original_poly = polys[*poly_index].clone();
+            for QueueItem(_, _, poly) in &lcs_queue {
+                Self::try_optimize_lc(poly, &mut polys[*poly_index]);
+            }
+            lcs_queue.insert(QueueItem(
+                original_poly.terms.len(),
+                *poly_index,
+                original_poly,
+            ));
+            total_processed += 1;
+            if total_processed % 1000 == 0 {
+                println!(
+                    "Optimizing outlined LCs; total processed {}",
+                    total_processed
+                );
+            }
+        }
+    }
+
     pub fn preprocess(r1cs: &R1CSFile<F>, config: ExpansionConfig) -> Self {
         let num_public_input = (r1cs.header.n_pub_in + r1cs.header.n_pub_out + 1) as usize;
         let mut witness = r1cs.witness.clone();
 
-        let mut constraint_polys = r1cs
-            .constraints
-            .iter()
-            .flat_map(|(a, b, c)| {
-                let mut out_polys = vec![];
+        let mut lcs = vec![];
+        let mut constraint_polys = vec![];
+        for (a, b, c) in &r1cs.constraints {
+            // Heuristic
+            let count_vars_a = a.iter().filter(|(var, _)| *var != 0).count();
+            let count_vars_b = b.iter().filter(|(var, _)| *var != 0).count();
+            let should_try_outline = count_vars_a >= 2 && count_vars_b >= 2;
 
-                // Heuristic
-                let count_vars_a = a.iter().filter(|(var, _)| *var != 0).count();
-                let count_vars_b = b.iter().filter(|(var, _)| *var != 0).count();
-                let should_try_outline = count_vars_a >= 2 && count_vars_b >= 2;
+            let should_outline_a = should_try_outline && count_vars_a >= 3;
+            let should_outline_b = should_try_outline && count_vars_b >= 3;
 
-                let should_outline_a = should_try_outline && count_vars_a >= 3;
-                let should_outline_b = should_try_outline && count_vars_b >= 3;
-
-                let mut outline_poly = |poly: &mut SparsePolynomial<F, SparseTerm>,
-                                        lc: &[(usize, F)]| {
+            let mut maybe_outline_poly = |lc: &[(usize, F)], force_outline: bool| {
+                let mut poly = Self::poly_from_lc(lc);
+                if poly.terms.len() >= 6 || force_outline {
+                    let num_terms = poly.terms.len();
                     poly.terms
                         .push((-F::one(), SparseTerm::new(vec![(witness.len(), 1)])));
-                    out_polys.push(take(poly));
-                    *poly = SparsePolynomial::from_coefficients_vec(
+                    constraint_polys.push(take(&mut poly));
+                    poly = SparsePolynomial::from_coefficients_vec(
                         usize::MAX,
                         vec![(F::one(), SparseTerm::new(vec![(witness.len(), 1)]))],
                     );
                     witness.push(Self::evaluate_lc(lc, &witness));
-                };
+                    lcs.push((num_terms, constraint_polys.len() - 1));
+                }
+                poly
+            };
 
-                let mut poly_a = Self::poly_from_lc(a);
-                if should_outline_a {
-                    outline_poly(&mut poly_a, a);
-                }
-                let mut poly_b = Self::poly_from_lc(b);
-                if should_outline_b {
-                    outline_poly(&mut poly_b, b);
-                }
-                let poly_c = Self::poly_from_lc(c);
-                let mut tentative_poly = naive_mul(&poly_a, &poly_b);
-                if !config.check_poly(&tentative_poly) {
-                    if !should_outline_a {
-                        outline_poly(&mut poly_a, a);
-                    }
-                    if !should_outline_b {
-                        outline_poly(&mut poly_b, b);
-                    }
-                    tentative_poly = naive_mul(&poly_a, &poly_b) ;
-                }
-                out_polys.push(&tentative_poly - &poly_c);
-                out_polys
-            })
-            .collect::<Vec<_>>();
+            let poly_a = maybe_outline_poly(a, should_outline_a);
+            let poly_b = maybe_outline_poly(b, should_outline_b);
+            let poly_c = maybe_outline_poly(c, false);
+            constraint_polys.push(&naive_mul(&poly_a, &poly_b) - &poly_c);
+        }
         println!("Outlined number constraints: {}", constraint_polys.len());
+        println!(
+            "Num terms before outlined LCs optimization: {}",
+            constraint_polys
+                .iter()
+                .map(|x| x.terms.len())
+                .sum::<usize>()
+        );
+        Self::optimize_outlined_lcs(&mut constraint_polys, lcs);
+
         println!(
             "Num terms: {}",
             constraint_polys
@@ -279,22 +403,30 @@ impl<F: PrimeField> ExpandedCircuit<F> {
             .map(|poly| Self::get_constraint_dependencies(num_public_input, poly))
             .collect::<Vec<_>>();
 
-        let mut dependent_map: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut dependent_map: HashMap<usize, (usize, Vec<usize>)> = HashMap::new();
         let mut dependent_queue: BTreeSet<(Reverse<usize>, usize)> = BTreeSet::new();
         let mut queue: BinaryHeap<(Reverse<usize>, usize)> = BinaryHeap::new();
         for (i, (linear_terms, dependencies)) in dependencies_list.iter().enumerate() {
-            for term in linear_terms.iter().chain(dependencies.iter()) {
-                dependent_map
+            for term in linear_terms.iter() {
+                let (count, dependents) = dependent_map
                     .entry(*term)
-                    .or_insert_with(|| Vec::new())
-                    .push(i);
+                    .or_insert_with(|| (0, Vec::new()));
+                *count += 1;
+                dependents.push(i);
+            }
+            for (term, dependency_count) in dependencies.iter() {
+                let (count, dependents) = dependent_map
+                    .entry(*term)
+                    .or_insert_with(|| (0, Vec::new()));
+                *count += dependency_count;
+                dependents.push(i);
             }
         }
         let maybe_enqueue = |queue: &mut BinaryHeap<(Reverse<usize>, usize)>,
-                             dependent_map: &mut HashMap<usize, Vec<usize>>,
+                             dependent_map: &mut HashMap<usize, (usize, Vec<usize>)>,
                              i,
                              linear_terms: &BTreeSet<usize>,
-                             dependencies: &BTreeSet<usize>| {
+                             dependencies: &BTreeMap<usize, usize>| {
             if dependencies.len() > 0 {
                 return;
             }
@@ -303,7 +435,7 @@ impl<F: PrimeField> ExpandedCircuit<F> {
             } else if linear_terms.len() == 1 {
                 let var = linear_terms.first().unwrap();
                 queue.push((
-                    Reverse(dependent_map.get(var).map(|x| x.len()).unwrap_or(0)),
+                    Reverse(dependent_map.get(var).map(|(count, _)| *count).unwrap_or(0)),
                     i,
                 ));
             }
@@ -317,8 +449,8 @@ impl<F: PrimeField> ExpandedCircuit<F> {
                 dependencies,
             );
         }
-        for (idx, dependents) in &dependent_map {
-            dependent_queue.insert((Reverse(dependents.len()), *idx));
+        for (idx, (count, _)) in &dependent_map {
+            dependent_queue.insert((Reverse(*count), *idx));
         }
 
         let mut out_constraints = vec![];
@@ -346,20 +478,20 @@ impl<F: PrimeField> ExpandedCircuit<F> {
 
                 let new_var = *linear_terms.first().unwrap();
                 let dependents = dependent_map.remove(&new_var);
-                let num_dependents = dependents.as_ref().map(|x| x.len()).unwrap_or(0);
+                let num_dependents = dependents.as_ref().map(|(count, _)| *count).unwrap_or(0);
 
                 // It's generally not worth it to inline if there are more than one usage
-                // (since it must be repeated at each instance)
-                // Note that self always counts as a dependent
-                let should_inline =
-                    num_dependents <= 2 && config.check_poly(&constraint_polys[idx]);
+                // since it must be repeated at each instance
+                // Unless the substitution only has one term
+                let should_inline = (num_dependents <= 2 || constraint_polys[idx].terms.len() == 2)
+                    && config.check_poly(&constraint_polys[idx]);
                 if !should_inline {
                     out_constraints.push(take(&mut constraint_polys[idx]));
                 }
 
                 debug_assert_eq!(linear_terms.len(), 1);
-                dependents.map(|dependents| {
-                    let removed = dependent_queue.remove(&(Reverse(dependents.len()), new_var));
+                dependents.map(|(count, dependents)| {
+                    let removed = dependent_queue.remove(&(Reverse(count), new_var));
                     debug_assert!(removed);
 
                     if should_inline {
@@ -423,7 +555,7 @@ impl<F: PrimeField> ExpandedCircuit<F> {
             while queue.is_empty() {
                 let (_, var) = dependent_queue.pop_first().unwrap();
 
-                for idx in dependent_map.remove(&var).unwrap() {
+                for idx in dependent_map.remove(&var).unwrap().1 {
                     if visited[idx] {
                         continue;
                     }

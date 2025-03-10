@@ -34,7 +34,8 @@ fn main() {
 
     println!("R1CS num constraints: {}", file.header.n_constraints);
 
-    let expanded = ExpandedCircuit::<Fr>::preprocess(&file, ExpansionConfig::MaxCost(40));
+    let expanded =
+        ExpandedCircuit::<Fr>::preprocess(&file, ExpansionConfig::MaxCost(50));
     println!(
         "Expanded circuit constraints: {}",
         expanded.constraints.len()
