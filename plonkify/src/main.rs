@@ -2,7 +2,7 @@ use ark_bn254::Fr;
 use circom_compat::{read_witness, R1CSFile};
 use clap::Parser;
 use plonkify::{
-    general::{ExpandedCircuit, ExpansionConfig, SimpleGeneralPlonkifier},
+    general::{ExpandedCircuit, ExpansionConfig, LinearOnlyGeneralPlonkifier, SimpleGeneralPlonkifier},
     vanilla::{GreedyBruteForcePlonkifier, OptimizedPlonkifier, SimplePlonkifer},
     CustomizedGates, GeneralPlonkifer, Plonkifier,
 };
@@ -34,24 +34,24 @@ fn main() {
 
     println!("R1CS num constraints: {}", file.header.n_constraints);
 
-    let expanded =
-        ExpandedCircuit::<Fr>::preprocess(&file, ExpansionConfig::MaxCost(50));
-    println!(
-        "Expanded circuit constraints: {}",
-        expanded.constraints.len()
-    );
-    assert!(expanded.is_satisfied(&expanded.witness));
+    
     let (plonkish_circuit, plonkish_witness) = SimpleGeneralPlonkifier::<Fr>::plonkify(
-        &expanded,
+        &file,
         &CustomizedGates::jellyfish_turbo_plonk_gate(),
     );
     // return;
 
+    // let (plonkish_circuit, plonkish_witness) = LinearOnlyGeneralPlonkifier::<Fr>::plonkify(
+    //     &file,
+    //     &CustomizedGates::jellyfish_turbo_plonk_gate(),
+    // );
+    // // return;
+
     // let (plonkish_circuit, plonkish_witness) = match cli.optimize {
-    //     0 => SimplePlonkifer::<Fr>::plonkify(&file),
-    //     1 => OptimizedPlonkifier::<Fr>::plonkify(&file),
-    //     2 => GreedyBruteForcePlonkifier::<Fr>::plonkify(&file),
-    //     _ => panic!("Unexpected optimizization level"),
+        // 0 => SimplePlonkifer::<Fr>::plonkify(&file),
+        // 1 => OptimizedPlonkifier::<Fr>::plonkify(&file),
+        // 2 => GreedyBruteForcePlonkifier::<Fr>::plonkify(&file),
+        // _ => panic!("Unexpected optimizization level"),
     // };
 
     println!(

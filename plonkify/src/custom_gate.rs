@@ -215,6 +215,7 @@ impl CustomizedGates {
 }
 
 // Gate structure that we use
+#[derive(Clone)]
 pub struct GateInfo {
     pub gates: Vec<Vec<(usize, usize)>>,
     pub is_linear: Vec<bool>,

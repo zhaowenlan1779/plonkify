@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::{
     circuit::{PlonkishCircuit, PlonkishCircuitParams},
@@ -15,9 +15,12 @@ use circom_compat::R1CSFile;
 use super::ExpandedCircuit;
 
 pub struct SimpleGeneralPlonkifier<F: PrimeField> {
+    gate: GateInfo,
     constraint_selectors: Vec<SelectorColumn<F>>,
     constraint_variables: Vec<Vec<usize>>,
     variable_assignments: Vec<F>,
+    // (x + ay + bz + cw) = z
+    addition_maps: HashMap<Vec<(usize, F)>, usize>,
 }
 
 fn get_quotient_term(term: &SparseTerm, divisor: &SparseTerm) -> Option<SparseTerm> {
@@ -60,6 +63,131 @@ impl<F: PrimeField> SimpleGeneralPlonkifier<F> {
     fn add_selectors(&mut self, values: Vec<F>) {
         for (i, selector) in values.iter().enumerate() {
             self.constraint_selectors[i].0.push(*selector);
+        }
+    }
+
+    fn addition_constraint(&mut self, vars: Vec<(usize, F)>, constant: F) {
+        assert!(vars.len() <= self.gate.linear_terms.len() + 1);
+
+        let selector_len = self.gate.num_selector_columns();
+        let mut selectors = vec![F::zero(); selector_len];
+        let mut variables = vec![0; self.gate.num_witness_columns()];
+
+        for ((var, coeff), (var_idx, selector_idx)) in
+            vars.iter().zip(self.gate.linear_terms.iter())
+        {
+            selectors[*selector_idx] = *coeff;
+            variables[*var_idx] = *var;
+        }
+
+        if vars.len() > self.gate.linear_terms.len() {
+            let (last_var, last_coeff) = vars.last().unwrap();
+            selectors[selector_len - 2] = *last_coeff;
+            *variables.last_mut().unwrap() = *last_var;
+        }
+        *selectors.last_mut().unwrap() = constant;
+
+        self.add_selectors(selectors);
+        self.constraint_variables.push(variables);
+    }
+
+    fn addition(&mut self, mut vars: Vec<(usize, F)>) -> (usize, F) {
+        assert!(vars.len() <= self.gate.linear_terms.len());
+
+        let coeff_a = vars[0].1;
+        let multiplier = vars[0].1.inverse().unwrap();
+        vars[0].1 = F::one();
+        for (_, coeff) in vars.iter_mut().skip(1) {
+            *coeff *= multiplier;
+        }
+
+        if let Some(index) = self.addition_maps.get(&vars) {
+            return (*index, coeff_a);
+        }
+
+        let selector_len = self.gate.num_selector_columns();
+        let mut selectors = vec![F::zero(); selector_len];
+        let mut variables = vec![0; self.gate.num_witness_columns()];
+
+        for ((var, coeff), (var_idx, selector_idx)) in
+            vars.iter().zip(self.gate.linear_terms.iter())
+        {
+            selectors[*selector_idx] = *coeff;
+            variables[*var_idx] = *var;
+        }
+        selectors[selector_len - 2] = -F::one();
+        let new_index = self.variable_assignments.len();
+        *variables.last_mut().unwrap() = new_index;
+
+        let sum = vars
+            .iter()
+            .map(|(var, coeff)| *coeff * self.variable_assignments[*var])
+            .sum::<F>();
+        self.variable_assignments.push(sum);
+
+        self.addition_maps.insert(vars, new_index);
+
+        self.add_selectors(selectors);
+        self.constraint_variables.push(variables);
+        (new_index, coeff_a)
+    }
+
+    fn lc_sum_constraint(&mut self, variables: &[(usize, F)], constant: F) {
+        if variables.len() == 0 {
+            return;
+        }
+
+        let mut variables = variables
+            .iter()
+            .filter(|(idx, coeff)| *idx != 0 && !coeff.is_zero())
+            .map(|(var, coeff)| (*var, *coeff, *var))
+            .collect::<Vec<_>>();
+        variables.sort_by_key(|(idx, _, _)| *idx);
+
+        let mut k = 1;
+        let mut additions = 0;
+        loop {
+            let mask = !((1 << k) - 1);
+            let mut last_indices = vec![];
+            for i in 0..variables.len() {
+                if variables[i].1.is_zero() {
+                    continue;
+                }
+
+                last_indices.push(i);
+                if last_indices.len() >= self.gate.linear_terms.len() {
+                    let last_indices_view =
+                        &last_indices[last_indices.len() - self.gate.linear_terms.len()..];
+                    let front_index = last_indices_view[0];
+                    if (variables[front_index].2 & mask) == (variables[i].2 & mask) {
+                        let vars = last_indices_view
+                            .iter()
+                            .map(|i| (variables[*i].0, variables[*i].1))
+                            .collect::<Vec<_>>();
+                        let (var, coeff) = self.addition(vars);
+                        variables[front_index].0 = var;
+                        variables[front_index].1 = coeff;
+                        for index in last_indices_view.iter().skip(1) {
+                            variables[*index] = (0, F::zero(), 0);
+                        }
+
+                        additions += self.gate.linear_terms.len() - 1;
+                        last_indices
+                            .truncate(last_indices.len() - self.gate.linear_terms.len() + 1);
+                    }
+                }
+            }
+            // variables.len() - additions = num terms remaining
+            if additions + self.gate.linear_terms.len() + 1 >= variables.len() {
+                // Add up the remaining terms
+                let vars = last_indices
+                    .iter()
+                    .map(|i| (variables[*i].0, variables[*i].1))
+                    .collect::<Vec<_>>();
+                self.addition_constraint(vars, constant);
+                return;
+            }
+            k += 1;
         }
     }
 
@@ -523,58 +651,13 @@ impl<F: PrimeField> SimpleGeneralPlonkifier<F> {
         }
 
         // Complete linear terms
-        let num_linear_terms = gate.linear_terms.len();
-
-        let mut cur_selectors = vec![F::zero(); selector_len];
-        let mut cur_vars = vec![0; gate.num_witness_columns()];
-        let mut linear_term_idx = 0;
-        let mut sum = F::zero();
+        let mut lc = vec![];
         while !terms_queue.is_empty() {
             let (_, term_idx) = terms_queue.pop_first().unwrap();
             let (coeff, term) = &terms[term_idx];
-
-            let (var_idx, selector_idx) = gate.linear_terms[linear_term_idx];
-            cur_selectors[selector_idx] = *coeff;
-            let variable = term.first().unwrap().0;
-            cur_vars[var_idx] = variable;
-            sum += *coeff * self.variable_assignments[variable];
-
-            linear_term_idx += 1;
-            if linear_term_idx >= num_linear_terms {
-                if terms_queue.len() == 1 {
-                    // One last linear term can be accomodated by the output variable
-                    let (_, term_idx) = terms_queue.pop_first().unwrap();
-                    let (coeff, term) = &terms[term_idx];
-                    cur_selectors[selector_len - 2] = *coeff;
-                    *cur_vars.last_mut().unwrap() = term.first().unwrap().0;
-                    break;
-                } else if terms_queue.len() == 0 {
-                    break;
-                }
-
-                let new_index = self.variable_assignments.len();
-                self.variable_assignments.push(sum);
-                let new_term = SparseTerm::new(vec![(new_index, 1)]);
-                terms_queue.insert((1, terms.len()));
-                terms.push((F::one(), new_term));
-
-                cur_selectors[selector_len - 2] = -F::one(); // Output
-                self.add_selectors(cur_selectors.clone());
-                *cur_vars.last_mut().unwrap() = new_index;
-                self.constraint_variables.push(cur_vars.clone());
-
-                cur_selectors.fill(F::zero());
-                cur_vars.fill(0);
-                sum = F::zero();
-
-                linear_term_idx = 0;
-            }
+            lc.push((term.first().unwrap().0, *coeff));
         }
-
-        // Final constraint
-        *cur_selectors.last_mut().unwrap() = constant;
-        self.add_selectors(cur_selectors);
-        self.constraint_variables.push(cur_vars);
+        self.lc_sum_constraint(&lc, constant);
     }
 }
 
@@ -587,9 +670,11 @@ impl<F: PrimeField> GeneralPlonkifer<F> for SimpleGeneralPlonkifier<F> {
         );
 
         let mut data = Self {
+            gate: GateInfo::jellyfish_turbo_plonk_gate(),
             constraint_selectors: vec![SelectorColumn::<F>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: circuit.witness.clone(),
+            addition_maps: HashMap::new(),
         };
 
         // Create constraints for public inputs
@@ -733,6 +818,7 @@ mod tests {
     fn test_single_constraint() {
         let gate = GateInfo::jellyfish_turbo_plonk_gate();
         let mut data = SimpleGeneralPlonkifier {
+            gate: gate.clone(),
             constraint_selectors: vec![SelectorColumn::<Fr>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: vec![
@@ -740,6 +826,7 @@ mod tests {
                 Fr::from_u64(2).unwrap(),
                 Fr::from_u64(32).unwrap(),
             ],
+            addition_maps: HashMap::new(),
         };
 
         let constraint = SparsePolynomial::from_coefficients_vec(
@@ -762,6 +849,7 @@ mod tests {
     fn test_single_constraint_2() {
         let gate = GateInfo::jellyfish_turbo_plonk_gate();
         let mut data = SimpleGeneralPlonkifier {
+            gate: gate.clone(),
             constraint_selectors: vec![SelectorColumn::<Fr>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: vec![
@@ -769,6 +857,7 @@ mod tests {
                 Fr::from_u64(2).unwrap(),
                 Fr::from_u64(3).unwrap(),
             ],
+            addition_maps: HashMap::new(),
         };
 
         let constraint = SparsePolynomial::from_coefficients_vec(
@@ -788,6 +877,7 @@ mod tests {
     fn test_single_constraint_3() {
         let gate = GateInfo::jellyfish_turbo_plonk_gate();
         let mut data = SimpleGeneralPlonkifier {
+            gate: gate.clone(),
             constraint_selectors: vec![SelectorColumn::<Fr>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: vec![
@@ -795,6 +885,7 @@ mod tests {
                 Fr::from_u64(2).unwrap(),
                 Fr::from_u64(3).unwrap(),
             ],
+            addition_maps: HashMap::new(),
         };
         let constraint = SparsePolynomial::from_coefficients_vec(
             3,
@@ -817,6 +908,7 @@ mod tests {
     fn test_single_constraint_4() {
         let gate = GateInfo::jellyfish_turbo_plonk_gate();
         let mut data = SimpleGeneralPlonkifier {
+            gate: gate.clone(),
             constraint_selectors: vec![SelectorColumn::<Fr>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: vec![
@@ -828,6 +920,7 @@ mod tests {
                 Fr::from_u64(5).unwrap(),
                 Fr::from_u64(6).unwrap(),
             ],
+            addition_maps: HashMap::new(),
         };
 
         let constraint = SparsePolynomial::from_coefficients_vec(
@@ -850,9 +943,11 @@ mod tests {
     fn test_single_constraint_5() {
         let gate = GateInfo::jellyfish_turbo_plonk_gate();
         let mut data = SimpleGeneralPlonkifier {
+            gate: gate.clone(),
             constraint_selectors: vec![SelectorColumn::<Fr>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: (0..102).map(|i| Fr::from_u64(i).unwrap()).collect(),
+            addition_maps: HashMap::new(),
         };
 
         let constraint = SparsePolynomial::from_coefficients_vec(
@@ -877,9 +972,11 @@ mod tests {
     fn test_single_constraint_6() {
         let gate = GateInfo::jellyfish_turbo_plonk_gate();
         let mut data = SimpleGeneralPlonkifier {
+            gate: gate.clone(),
             constraint_selectors: vec![SelectorColumn::<Fr>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: (0..102).map(|i| Fr::from_u64(i).unwrap()).collect(),
+            addition_maps: HashMap::new(),
         };
 
         let constraint = SparsePolynomial::from_coefficients_vec(
@@ -909,6 +1006,7 @@ mod tests {
     fn test_single_constraint_7() {
         let gate = GateInfo::jellyfish_turbo_plonk_gate();
         let mut data = SimpleGeneralPlonkifier {
+            gate: gate.clone(),
             constraint_selectors: vec![SelectorColumn::<Fr>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: vec![
@@ -916,6 +1014,7 @@ mod tests {
                 Fr::from_u64(2).unwrap(),
                 Fr::from_u64(3).unwrap(),
             ],
+            addition_maps: HashMap::new(),
         };
 
         let constraint = SparsePolynomial::from_coefficients_vec(
@@ -936,9 +1035,11 @@ mod tests {
     fn test_single_constraint_8() {
         let gate = GateInfo::jellyfish_turbo_plonk_gate();
         let mut data = SimpleGeneralPlonkifier {
+            gate: gate.clone(),
             constraint_selectors: vec![SelectorColumn::<Fr>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: vec![Fr::one(), Fr::one(), Fr::zero(), Fr::one(), Fr::zero()],
+            addition_maps: HashMap::new(),
         };
 
         let constraint = SparsePolynomial::from_coefficients_vec(
