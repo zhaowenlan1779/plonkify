@@ -520,7 +520,6 @@ impl<F: PrimeField> SimpleGeneralPlonkifier<F> {
     fn process_constraint(
         &mut self,
         constraint: &SparsePolynomial<F, SparseTerm>,
-        gate: &GateInfo,
     ) {
         let mut constant = F::zero();
         let mut terms = constraint
@@ -541,7 +540,7 @@ impl<F: PrimeField> SimpleGeneralPlonkifier<F> {
             terms_queue.insert((term.degree(), term_idx));
         }
 
-        let selector_len = gate.num_selector_columns();
+        let selector_len = self.gate.num_selector_columns();
         while !terms_queue.is_empty() {
             let &(degree, term_idx) = terms_queue.last().unwrap();
             if degree <= 1 {
@@ -552,15 +551,15 @@ impl<F: PrimeField> SimpleGeneralPlonkifier<F> {
             let (coeff, term) = &terms[term_idx];
 
             let mut out = None;
-            for order_idx in 0..gate.orders.len() {
-                let mut compatible_gates = (0..gate.gates.len())
+            for order_idx in 0..self.gate.orders.len() {
+                let mut compatible_gates = (0..self.gate.gates.len())
                     .filter_map(|i| {
                         Self::match_term_to_gate(
                             &term,
-                            gate,
+                            &self.gate,
                             i,
                             order_idx,
-                            vec![-1; gate.num_witness_columns() - 1],
+                            vec![-1; self.gate.num_witness_columns() - 1],
                             false,
                         )
                         .map(|x| (i, x))
@@ -586,7 +585,7 @@ impl<F: PrimeField> SimpleGeneralPlonkifier<F> {
                         &remainder_term,
                         0,
                         term_idx,
-                        gate,
+                        &self.gate,
                         order_idx,
                         assigned_vars,
                         reduced_degrees,
@@ -626,7 +625,7 @@ impl<F: PrimeField> SimpleGeneralPlonkifier<F> {
                     .into_iter()
                     .map(|x| if x == -1 { 0 } else { x as usize })
                     .collect::<Vec<_>>();
-                self.variable_assignments.push(gate.evaluate_no_output(
+                self.variable_assignments.push(self.gate.evaluate_no_output(
                     &selectors,
                     &self.variable_assignments,
                     &constraint_vars,
@@ -670,7 +669,7 @@ impl<F: PrimeField> GeneralPlonkifer<F> for SimpleGeneralPlonkifier<F> {
         );
 
         let mut data = Self {
-            gate: GateInfo::jellyfish_turbo_plonk_gate(),
+            gate: GateInfo::new(gate).unwrap(),
             constraint_selectors: vec![SelectorColumn::<F>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: circuit.witness.clone(),
@@ -685,9 +684,8 @@ impl<F: PrimeField> GeneralPlonkifer<F> for SimpleGeneralPlonkifier<F> {
             data.constraint_variables.push(variables);
         }
 
-        let gate_info = GateInfo::jellyfish_turbo_plonk_gate();
         for constraint in &circuit.constraints {
-            data.process_constraint(constraint, &gate_info);
+            data.process_constraint(constraint);
         }
 
         let num_constraints = data.constraint_variables.len();
@@ -840,7 +838,7 @@ mod tests {
             ],
         );
 
-        data.process_constraint(&constraint, &gate);
+        data.process_constraint(&constraint);
         assert_eq!(data.constraint_variables.len(), 1);
         check_satisfied(&gate, &data);
     }
@@ -868,7 +866,7 @@ mod tests {
             ],
         );
 
-        data.process_constraint(&constraint, &gate);
+        data.process_constraint(&constraint);
         assert_eq!(data.constraint_variables.len(), 1);
         check_satisfied(&gate, &data);
     }
@@ -899,7 +897,7 @@ mod tests {
             ],
         );
 
-        data.process_constraint(&constraint, &gate);
+        data.process_constraint(&constraint);
         assert_eq!(data.constraint_variables.len(), 2);
         check_satisfied(&gate, &data);
     }
@@ -934,7 +932,7 @@ mod tests {
             ],
         );
 
-        data.process_constraint(&constraint, &gate);
+        data.process_constraint(&constraint);
         assert_eq!(data.constraint_variables.len(), 2);
         check_satisfied(&gate, &data);
     }
@@ -963,7 +961,7 @@ mod tests {
                 .collect(),
         );
 
-        data.process_constraint(&constraint, &gate);
+        data.process_constraint(&constraint);
         assert_eq!(data.constraint_variables.len(), 33);
         check_satisfied(&gate, &data);
     }
@@ -997,7 +995,7 @@ mod tests {
                 .collect(),
         );
 
-        data.process_constraint(&constraint, &gate);
+        data.process_constraint(&constraint);
         assert_eq!(data.constraint_variables.len(), 33);
         check_satisfied(&gate, &data);
     }
@@ -1026,7 +1024,7 @@ mod tests {
             ],
         );
 
-        data.process_constraint(&constraint, &gate);
+        data.process_constraint(&constraint);
         assert_eq!(data.constraint_variables.len(), 2);
         check_satisfied(&gate, &data);
     }
@@ -1052,7 +1050,7 @@ mod tests {
             ],
         );
 
-        data.process_constraint(&constraint, &gate);
+        data.process_constraint(&constraint);
         assert_eq!(data.constraint_variables.len(), 2);
         check_satisfied(&gate, &data);
     }

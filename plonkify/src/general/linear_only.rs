@@ -214,7 +214,7 @@ impl<F: PrimeField> LinearOnlyGeneralPlonkifier<F> {
 impl<F: PrimeField> GeneralPlonkifer<F> for LinearOnlyGeneralPlonkifier<F> {
     fn plonkify(r1cs: &R1CSFile<F>, gate: &CustomizedGates) -> (PlonkishCircuit<F>, Vec<F>) {
         let mut data = Self {
-            gate: GateInfo::jellyfish_turbo_plonk_gate(),
+            gate: GateInfo::new(gate).unwrap(),
             constraint_selectors: vec![SelectorColumn::<F>(vec![]); gate.num_selector_columns()],
             constraint_variables: Vec::new(),
             variable_assignments: r1cs.witness.clone(),
