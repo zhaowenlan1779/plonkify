@@ -5,7 +5,9 @@
 // along with the HyperPlonk library. If not, see <https://mit-license.org/>.
 
 use ark_ff::PrimeField;
-use ark_std::cmp::max;
+use ark_std::iterable::Iterable;
+use std::cmp::max;
+use std::collections::HashSet;
 
 /// Customized gate is a list of tuples of
 ///     (coefficient, selector_index, wire_indices)
@@ -212,10 +214,25 @@ impl CustomizedGates {
             ],
         }
     }
+
+    pub fn super_long_selector_gate_with_output() -> Self {
+        Self {
+            gates: vec![
+                (1, Some(0), vec![0]),
+                (1, Some(1), vec![1]),
+                (1, Some(2), vec![2]),
+                (1, Some(3), vec![0, 1]),
+                (1, Some(4), vec![0, 2]),
+                (1, Some(5), vec![1, 2]),
+                (1, Some(6), vec![3]),
+                (1, Some(7), vec![]),
+            ],
+        }
+    }
 }
 
 // Gate structure that we use
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GateInfo {
     pub gates: Vec<Vec<(usize, usize)>>,
     pub is_linear: Vec<bool>,
@@ -254,22 +271,135 @@ impl GateInfo {
         res + 2
     }
 
-    // pub fn new(gate: &CustomizedGates) -> Self {
-    //     let num_witnesses = gate.num_witness_columns();
-    //     let gates = gate.gates.iter().map(
-    //         |(coeff, q, variables)| {
-    //             let mut out_gate = vec![];
-    //             for i in 0..variables.len() {
-    //                 if i == 0 || variables[i] != variables[i - 1] {
-    //                     out_gate.push((variables[i], 0usize));
-    //                 }
-    //                 out_gate.last_mut().unwrap().1 += 1;
-    //             }
-    //             out_gate
-    //         }
-    //     ).collect::<Vec<_>>();
+    fn next_permutation<T: Ord>(v: &mut [T]) -> bool {
+        if v.len() == 1 {
+            return false;
+        }
+        let mut i = v.len() - 1;
+        while i > 0 {
+            i -= 1;
+            if v[i] < v[i + 1] {
+                let mut j = v.len() - 1;
+                while v[i] >= v[j] {
+                    j -= 1;
+                }
+                v.swap(i, j);
 
-    // }
+                let mut low = i + 1;
+                let mut high = v.len() - 1;
+                while low < high {
+                    v.swap(low, high);
+                    low += 1;
+                    high -= 1;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn new(gate: &CustomizedGates) -> Result<Self, String> {
+        let mut gates = vec![];
+        for (coeff, selector, variables) in &gate.gates {
+            if *coeff != 1 {
+                return Err("Non-1 coeff is currently unsupported".to_string());
+            }
+            if let Some(selector_idx) = selector {
+                if *selector_idx != gates.len() {
+                    return Err("Some selector indices appear to be skipped".to_string());
+                }
+                let mut out_gate = vec![];
+                for i in 0..variables.len() {
+                    if i == 0 || variables[i] != variables[i - 1] {
+                        out_gate.push((variables[i], 0usize));
+                    }
+                    out_gate.last_mut().unwrap().1 += 1;
+                }
+                gates.push(out_gate);
+            } else {
+                return Err("Missing selector is currently unsupported".to_string());
+            }
+        }
+        if !gates.last().unwrap().is_empty() {
+            return Err("Missing constant term".to_string());
+        }
+        let output_term = gates[gates.len() - 2].clone();
+        if output_term.len() != 1
+            || output_term[0].1 != 1
+            || output_term[0].0 != gate.num_witness_columns() - 1
+        {
+            return Err("Output term is not in proper form".to_string());
+        }
+        gates.truncate(gates.len() - 2);
+
+        let is_linear = gates
+            .iter()
+            .map(|gate| gate.len() == 1 && gate[0].1 == 1)
+            .collect::<Vec<_>>();
+        let linear_terms = gates
+            .iter()
+            .enumerate()
+            .flat_map(|(selector_idx, gate)| {
+                if gate.len() == 1 && gate[0].1 == 1 {
+                    Some((gate[0].0, selector_idx))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let var_a = linear_terms[0].0;
+        let var_b = linear_terms[1].0;
+        let mul_selector = gates
+            .iter()
+            .position(|gate| *gate == vec![(var_a, 1), (var_b, 1)])
+            .ok_or("Failed to find multiplication term".to_string())?;
+        let vanilla_compatibility_info = (
+            var_a,
+            var_b,
+            linear_terms[0].1,
+            linear_terms[1].1,
+            mul_selector,
+        );
+
+        let mut perm = (0..(gate.num_witness_columns() - 1)).collect::<Vec<_>>();
+        let mut orders = vec![];
+        let mut effective_gates_set = HashSet::new();
+        loop {
+            let mut effective_gates = gates
+                .iter()
+                .map(|gate| {
+                    let mut new_gate = gate
+                        .iter()
+                        .flat_map(|(var, power)| {
+                            if *var == perm.len() {
+                                None
+                            } else {
+                                Some((perm[*var], *power))
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    new_gate.sort();
+                    new_gate
+                })
+                .collect::<Vec<_>>();
+            effective_gates.sort();
+            if effective_gates_set.insert(effective_gates) {
+                orders.push(perm.clone());
+            }
+
+            if !Self::next_permutation(&mut perm) {
+                break;
+            }
+        }
+
+        Ok(GateInfo {
+            gates,
+            is_linear,
+            orders,
+            linear_terms,
+            vanilla_compatibility_info,
+        })
+    }
 
     pub fn jellyfish_turbo_plonk_gate() -> Self {
         Self {
@@ -342,5 +472,59 @@ impl GateInfo {
             .sum::<F>()
             + selectors[selector_len - 2] * witness[*variables.last().unwrap()]
             + selectors.last().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gate_info() {
+        let generated_gate_info =
+            GateInfo::new(&CustomizedGates::jellyfish_turbo_plonk_gate()).unwrap();
+        let expected_gate_info = GateInfo {
+            gates: vec![
+                (vec![(0, 1)]),
+                (vec![(1, 1)]),
+                (vec![(2, 1)]),
+                (vec![(3, 1)]),
+                (vec![(0, 1), (1, 1)]),
+                (vec![(2, 1), (3, 1)]),
+                (vec![(0, 5)]),
+                (vec![(1, 5)]),
+                (vec![(2, 5)]),
+                (vec![(3, 5)]),
+                (vec![(0, 1), (1, 1), (2, 1), (3, 1)]),
+            ],
+            is_linear: vec![
+                true, true, true, true, false, false, false, false, false, false, false,
+            ],
+            orders: vec![vec![0, 1, 2, 3], vec![0, 2, 1, 3], vec![0, 3, 1, 2]],
+            linear_terms: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            vanilla_compatibility_info: (0, 1, 0, 1, 4),
+        };
+        assert_eq!(generated_gate_info, expected_gate_info);
+    }
+
+    #[test]
+    fn test_gate_info_2() {
+        let generated_gate_info =
+            GateInfo::new(&CustomizedGates::super_long_selector_gate_with_output()).unwrap();
+        let expected_gate_info = GateInfo {
+            gates: vec![
+                (vec![(0, 1)]),
+                (vec![(1, 1)]),
+                (vec![(2, 1)]),
+                (vec![(0, 1), (1, 1)]),
+                (vec![(0, 1), (2, 1)]),
+                (vec![(1, 1), (2, 1)]),
+            ],
+            is_linear: vec![true, true, true, false, false, false],
+            orders: vec![vec![0, 1, 2]],
+            linear_terms: vec![(0, 0), (1, 1), (2, 2)],
+            vanilla_compatibility_info: (0, 1, 0, 1, 3),
+        };
+        assert_eq!(generated_gate_info, expected_gate_info);
     }
 }
