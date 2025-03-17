@@ -1,5 +1,7 @@
 use crate::{
-    circuit::{PlonkishCircuit, PlonkishCircuitParams}, custom_gate::CustomizedGates, plonkify::Plonkifier,
+    circuit::{PlonkishCircuit, PlonkishCircuitParams},
+    custom_gate::CustomizedGates,
+    plonkify::Plonkifier,
     selectors::SelectorColumn,
 };
 use ark_ff::PrimeField;
@@ -67,6 +69,36 @@ impl<F: PrimeField> SimplePlonkifer<F> {
         self.constraint_variables.push(vec![var_a, var_b, var_c]);
     }
 
+    fn mul_constraint_c_opt(
+        &mut self,
+        (var_a, coeff_a, const_a): (usize, F, F),
+        (var_b, coeff_b, const_b): (usize, F, F),
+        variables_c: &[(usize, F)],
+    ) {
+        let mut selectors = vec![
+            const_b * coeff_a,
+            const_a * coeff_b,
+            F::zero(),
+            coeff_a * coeff_b,
+            const_a * const_b,
+        ];
+        let mut var_c = 0usize;
+        for (var, coeff) in variables_c {
+            if *var == 0 {
+                selectors[4] -= coeff;
+            } else if *var == var_a {
+                selectors[0] -= coeff;
+            } else if *var == var_b {
+                selectors[1] -= coeff;
+            } else {
+                var_c = *var;
+                selectors[2] -= coeff;
+            }
+        }
+        self.add_selectors(selectors);
+        self.constraint_variables.push(vec![var_a, var_b, var_c]);
+    }
+
     fn lc_sum(&mut self, variables: &[(usize, F)]) -> (usize, F, F) {
         if variables.len() == 0 {
             (0, F::zero(), F::zero())
@@ -81,6 +113,33 @@ impl<F: PrimeField> SimplePlonkifer<F> {
             }
             sum
         }
+    }
+
+    fn lc_sum_c_opt(
+        &mut self,
+        variables: &[(usize, F)],
+        var_a: usize,
+        var_b: usize,
+    ) -> Vec<(usize, F)> {
+        if variables.len() == 0 {
+            return vec![];
+        }
+
+        let mut terms = variables
+            .iter()
+            .filter(|(idx, coeff)| {
+                (*idx == 0 || *idx == var_a || *idx == var_b) && !coeff.is_zero()
+            })
+            .map(|x| *x)
+            .collect::<Vec<_>>();
+        let mut sum = (0, F::zero(), F::zero());
+        for (var, coeff) in variables {
+            if *var != 0 && *var != var_a && *var != var_b && !coeff.is_zero() {
+                sum = self.addition(sum, (*var, *coeff, F::zero()));
+            }
+        }
+        terms.push((sum.0, sum.1));
+        terms
     }
 }
 
@@ -103,8 +162,8 @@ impl<F: PrimeField> Plonkifier<F> for SimplePlonkifer<F> {
         for (a, b, c) in &r1cs.constraints {
             let value_a = data.lc_sum(&a);
             let value_b = data.lc_sum(&b);
-            let value_c = data.lc_sum(&c);
-            data.mul_constraint(value_a, value_b, value_c);
+            let value_c = data.lc_sum_c_opt(&c, value_a.0, value_b.0);
+            data.mul_constraint_c_opt(value_a, value_b, &value_c);
         }
 
         let num_constraints = data.constraint_variables.len();
