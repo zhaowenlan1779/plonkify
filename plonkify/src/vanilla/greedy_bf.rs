@@ -117,6 +117,41 @@ impl<F: PrimeField> GreedyBruteForcePlonkifier<F> {
             (sum.0, sum.1, *constant)
         }
     }
+
+    fn lc_sum_c_opt(
+        &mut self,
+        variables: &[(usize, F)],
+        var_a: usize,
+        var_b: usize,
+    ) -> Vec<(usize, F)> {
+        if variables.len() == 0 {
+            return vec![];
+        }
+
+        let mut terms = variables
+            .iter()
+            .filter(|(idx, coeff)| {
+                (*idx == 0 || *idx == var_a || *idx == var_b) && !coeff.is_zero()
+            })
+            .map(|x| *x)
+            .collect::<Vec<_>>();
+        let mut sum = (0, F::zero());
+        let mut inverse = F::zero();
+        for (var, coeff) in variables {
+            if *var == 0 || *var == var_a || *var == var_b || coeff.is_zero() {
+                continue;
+            }
+            if sum.0 == 0 {
+                sum = (*var, *coeff);
+                inverse = sum.1.inverse().unwrap();
+            } else {
+                let new_var = self.addition(sum.0, *var, *coeff * inverse);
+                sum.0 = new_var;
+            }
+        }
+        terms.push((sum.0, sum.1));
+        terms
+    }
 }
 
 impl<F: PrimeField> Plonkifier<F> for GreedyBruteForcePlonkifier<F> {
@@ -334,21 +369,8 @@ impl<F: PrimeField> Plonkifier<F> for GreedyBruteForcePlonkifier<F> {
             let value_a = data.lc_sum(&a);
             let value_b = data.lc_sum(&b);
 
-            let mut c_count = 0;
-            for (var, _) in &c.0 {
-                if *var != value_a.0 && *var != value_b.0 {
-                    c_count += 1;
-                }
-                if c_count >= 2 {
-                    break;
-                }
-            }
-            if c_count <= 1 {
-                data.mul_constraint_c_opt(value_a, value_b, &c.0, c.1);
-            } else {
-                let value_c = data.lc_sum(&c);
-                data.mul_constraint(value_a, value_b, value_c);
-            }
+            let value_c = data.lc_sum_c_opt(&c.0, value_a.0, value_b.0);
+            data.mul_constraint_c_opt(value_a, value_b, &value_c, c.1);
         }
 
         let num_constraints = data.constraint_variables.len();
