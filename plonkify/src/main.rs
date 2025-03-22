@@ -3,7 +3,8 @@ use circom_compat::{read_witness, R1CSFile};
 use clap::Parser;
 use plonkify::{
     general::{
-        ExpandedCircuit, ExpansionConfig, LinearOnlyGeneralPlonkifier, SimpleGeneralPlonkifier,
+        ExpandedCircuit, ExpansionConfig, LinearOnlyGeneralPlonkifier,
+        NaiveLinearOnlyGeneralPlonkifier, SimpleGeneralPlonkifier,
     },
     vanilla::{GreedyBruteForcePlonkifier, OptimizedPlonkifier, SimplePlonkifer},
     CustomizedGates, GeneralPlonkifer, Plonkifier,
@@ -56,11 +57,15 @@ fn main() {
     for i in 0..5 {
         if cli.general {
             let (plonkish_circuit, plonkish_witness) = match cli.optimize {
-                0 => LinearOnlyGeneralPlonkifier::<Fr>::plonkify(
+                0 => NaiveLinearOnlyGeneralPlonkifier::<Fr>::plonkify(
                     &file,
                     &CustomizedGates::jellyfish_turbo_plonk_gate(),
                 ),
-                1 => SimpleGeneralPlonkifier::<Fr>::plonkify(
+                1 => LinearOnlyGeneralPlonkifier::<Fr>::plonkify(
+                    &file,
+                    &CustomizedGates::jellyfish_turbo_plonk_gate(),
+                ),
+                2 => SimpleGeneralPlonkifier::<Fr>::plonkify(
                     &file,
                     &CustomizedGates::jellyfish_turbo_plonk_gate(),
                 ),
@@ -83,6 +88,7 @@ fn main() {
             );
         }
     }
+    
     let end = Instant::now();
     println!("Time: {}", (end - start).as_micros() / 5);
 }
