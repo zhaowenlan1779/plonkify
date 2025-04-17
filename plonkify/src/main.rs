@@ -1,5 +1,5 @@
 use ark_bn254::Fr;
-use circom_compat::{read_witness, R1CSFile};
+use circom_compat::{read_witness, read_binary_wtns, R1CSFile};
 use clap::Parser;
 use plonkify::{
     general::{
@@ -36,8 +36,14 @@ fn main() {
     let reader = BufReader::new(File::open(cli.circuit).unwrap());
     let mut file = R1CSFile::<Fr>::new(reader).unwrap();
 
+    let is_json_witness = cli.witness.to_ascii_uppercase().ends_with(".JSON");
     let witness_reader = BufReader::new(File::open(cli.witness).unwrap());
-    file.witness = read_witness::<Fr>(witness_reader);
+    
+    file.witness = if is_json_witness {
+        read_witness::<Fr>(witness_reader)
+    } else {
+        read_binary_wtns::<Fr>(witness_reader).unwrap()
+    };
 
     println!("R1CS num constraints: {}", file.header.n_constraints);
 
