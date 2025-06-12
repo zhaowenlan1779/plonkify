@@ -114,6 +114,10 @@ impl<F: PrimeField> OptimizedPlonkifier<F> {
                 .collect::<Vec<_>>();
             variables.sort_by_key(|(idx, _, _)| *idx);
 
+            if variables.len() == 0 {
+                return (0, F::zero(), constant);
+            }
+
             let mut k = 1;
             let mut additions = 0;
             loop {
